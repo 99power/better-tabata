@@ -1,0 +1,16 @@
+# Dependencies
+node_modules/
+
+# Build artifacts
+dist/
+build/
+*.zeus
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Zepp OS temporary files
+.temp/
+.cache/
+logs/

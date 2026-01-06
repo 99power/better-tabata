@@ -1,0 +1,58 @@
+{
+    "configVersion": "v3",
+    "app": {
+        "appId": 1101666,
+        "appName": "Better Tabata",
+        "appType": "app",
+        "version": {
+            "code": 1,
+            "name": "0.1.1"
+        },
+        "icon": "icon.png",
+        "vender": "zepp",
+        "description": "A beautiful Tabata timer"
+    },
+    "permissions": [
+        "data:user",
+        "data:user.hd.heart_rate",
+        "data:user.hd.measurement",
+        "device:os.local_storage"
+    ],
+    "runtime": {
+        "apiVersion": {
+            "compatible": "4.0",
+            "target": "4.0",
+            "minVersion": "4.0"
+        }
+    },
+    "targets": {
+        "default": {
+            "module": {
+                "page": {
+                    "pages": [
+                        "page/index",
+                        "page/timer"
+                    ]
+                },
+                "app-side": {
+                    "path": "app-side/index"
+                },
+                "setting": {
+                    "path": "setting/index"
+                }
+            },
+            "platforms": [
+                {
+                    "st": "r",
+                    "dw": 480
+                }
+            ]
+        }
+    },
+    "i18n": {
+        "en-US": {
+            "appName": "Better Tabata"
+        }
+    },
+    "defaultLanguage": "en-US"
+}
