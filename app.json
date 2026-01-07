@@ -31,14 +31,9 @@
                 "page": {
                     "pages": [
                         "page/index",
-                        "page/timer"
+                        "page/timer",
+                        "page/presets"
                     ]
-                },
-                "app-side": {
-                    "path": "app-side/index"
-                },
-                "setting": {
-                    "path": "setting/index"
                 }
             },
             "platforms": [

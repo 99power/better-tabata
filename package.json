@@ -1,6 +1,6 @@
 {
     "name": "better-tabata",
-    "version": "1.0.0",
+    "version": "0.1.1",
     "description": "A better Tabata timer app for the T-Rex 3 Pro featuring buzzers, stronger vibrations and an accessible UI with the use of the physical buttons.",
     "main": "app.js",
     "scripts": {
@@ -9,6 +9,6 @@
     "author": "",
     "license": "ISC",
     "devDependencies": {
-        "@zeppos/device-types": "^4.0.0"
+        "@zeppos/device-types": "^3.0.0"
     }
 }

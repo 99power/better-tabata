@@ -1,11 +1,12 @@
 import { createWidget, widget, align, prop } from '@zos/ui'
 import { back } from '@zos/router'
 import { px } from '@zos/utils'
-import { setPageBrightTime, stopPageBrightTime } from '@zos/display'
+import { setPageBrightTime, pauseDropWristScreenOff, resetDropWristScreenOff, pausePalmScreenOff, resetPalmScreenOff } from '@zos/display'
 import { Vibrator, VIBRATOR_SCENE_SHORT_STRONG, VIBRATOR_SCENE_SHORT_MIDDLE } from '@zos/sensor'
 import { Buzzer } from '@zos/sensor'
 import { HeartRate } from '@zos/sensor'
 import { onKey, offKey, KEY_UP, KEY_DOWN, KEY_SELECT, KEY_EVENT_CLICK } from '@zos/interaction'
+import { LocalStorage } from '@zos/storage'
 
 let vib = null
 let buzzer = null
@@ -19,6 +20,9 @@ const COLOR_WORK = 0x00FF99 // Neon Mint (Green)
 const COLOR_REST = 0xAA00FF // Purple
 const COLOR_READY = 0x00D4FF // Turquoise/Cyan
 const COLOR_BG = 0x000000
+
+// State persistence key
+const TIMER_STATE_KEY = 'timer_state'
 
 Page({
     state: {
@@ -38,6 +42,10 @@ Page({
 
         totalTimeLeft: 0,
 
+        // Track actual elapsed time since workout start
+        workoutStartTime: 0,
+        totalPausedDuration: 0,
+
         // UI Widgets
         arcWidget: null,
         arcGlowWidget: null,
@@ -56,26 +64,90 @@ Page({
         centerY: 0,
         radius: 0,
 
-        currentHeartRate: 0
+        currentHeartRate: 0,
+
+        // Storage instance
+        storage: null,
+
+        // Flag to track if we resumed from saved state
+        resumedFromSave: false
     },
 
     onInit(params) {
+        try {
+            this.state.storage = new LocalStorage()
+        } catch (e) {
+            console.log('Storage init error', e)
+        }
+
+        // If we have params, this is a NEW workout - clear any saved state first
         if (params) {
             try {
                 let p = JSON.parse(params)
+                // Clear any previous saved state since this is a fresh start
+                this.clearTimerState()
+
                 this.state.workDuration = parseInt(p.work)
                 this.state.restDuration = parseInt(p.rest)
                 this.state.totalLoops = parseInt(p.loops)
+                this.calculateTotalTime()
+                this.state.workoutStartTime = Date.now()
+                this.state.resumedFromSave = false
             } catch (e) {
                 console.log('Params Parse Error', e)
             }
+        } else {
+            // No params - check if we have a saved state to resume
+            const savedState = this.loadTimerState()
+
+            if (savedState && savedState.currentPhase !== 'FINISHED') {
+                // Resume from saved state
+                console.log('Resuming from saved state', savedState)
+                this.state.workDuration = savedState.workDuration
+                this.state.restDuration = savedState.restDuration
+                this.state.totalLoops = savedState.totalLoops
+                this.state.currentLoop = savedState.currentLoop
+                this.state.currentPhase = savedState.currentPhase
+                this.state.totalTimeLeft = savedState.totalTimeLeft
+                this.state.workoutStartTime = savedState.workoutStartTime
+                this.state.totalPausedDuration = savedState.totalPausedDuration || 0
+
+                // Calculate remaining time in phase based on saved progress
+                const phaseProgress = savedState.phaseProgress || 0
+                if (savedState.currentPhase === 'READY') {
+                    this.state.phaseDuration = 5000
+                } else if (savedState.currentPhase === 'WORK') {
+                    this.state.phaseDuration = this.state.workDuration * 1000
+                } else if (savedState.currentPhase === 'REST') {
+                    this.state.phaseDuration = this.state.restDuration * 1000
+                }
+
+                // Set phase start time to simulate the progress
+                const elapsed = this.state.phaseDuration * (1 - phaseProgress)
+                this.state.phaseStartTime = Date.now() - elapsed
+                this.state.timeLeft = Math.ceil((this.state.phaseDuration - elapsed) / 1000)
+
+                this.state.resumedFromSave = true
+                this.state.isPaused = true // Start paused so user can see where they were
+            } else {
+                // No saved state and no params - use defaults
+                this.calculateTotalTime()
+                this.state.workoutStartTime = Date.now()
+            }
         }
 
+        // Keep screen always on - all with duration: 0 for indefinite
         try {
-            setPageBrightTime({ brightTime: 60 * 60 * 1000 })
+            setPageBrightTime({ brightTime: 0 })
         } catch (e) { }
 
-        this.calculateTotalTime()
+        try {
+            pauseDropWristScreenOff({ duration: 0 })
+        } catch (e) { }
+
+        try {
+            pausePalmScreenOff({ duration: 0 })
+        } catch (e) { }
     },
 
     build() {
@@ -325,20 +397,130 @@ Page({
             }
         })
 
-        this.startReadyPhase()
+        if (this.state.resumedFromSave) {
+            // Show resumed state (paused)
+            this.updateUI(this.state.phaseDuration * (this.state.timeLeft * 1000 / this.state.phaseDuration))
+        } else {
+            this.startReadyPhase()
+        }
     },
 
     onDestroy() {
         this.stopTimer()
+
+        // Save state on destroy (crash recovery)
+        if (this.state.currentPhase !== 'FINISHED') {
+            this.saveTimerState()
+        } else {
+            // Clear saved state when finished
+            this.clearTimerState()
+        }
+
         try {
-            resetPageBrightTime()
             offKey()
             if (heartRate) heartRate.offCurrentChange()
         } catch (e) { }
     },
 
+    // State persistence methods
+    saveTimerState() {
+        try {
+            if (!this.state.storage) {
+                this.state.storage = new LocalStorage()
+            }
+
+            // Calculate current phase progress (0-1)
+            const now = Date.now()
+            const elapsed = now - this.state.phaseStartTime
+            const phaseProgress = Math.max(0, Math.min(1, 1 - (elapsed / this.state.phaseDuration)))
+
+            const stateToSave = {
+                workDuration: this.state.workDuration,
+                restDuration: this.state.restDuration,
+                totalLoops: this.state.totalLoops,
+                currentLoop: this.state.currentLoop,
+                currentPhase: this.state.currentPhase,
+                totalTimeLeft: this.state.totalTimeLeft,
+                phaseProgress: phaseProgress,
+                workoutStartTime: this.state.workoutStartTime,
+                totalPausedDuration: this.state.totalPausedDuration,
+                savedAt: now
+            }
+
+            this.state.storage.setItem(TIMER_STATE_KEY, JSON.stringify(stateToSave))
+            console.log('Timer state saved', stateToSave)
+        } catch (e) {
+            console.log('Save timer state error', e)
+        }
+    },
+
+    loadTimerState() {
+        try {
+            if (!this.state.storage) {
+                this.state.storage = new LocalStorage()
+            }
+
+            const saved = this.state.storage.getItem(TIMER_STATE_KEY)
+            if (saved) {
+                const parsed = typeof saved === 'string' ? JSON.parse(saved) : saved
+
+                // Check if saved state is recent (within 1 hour)
+                const now = Date.now()
+                if (parsed.savedAt && (now - parsed.savedAt) < 60 * 60 * 1000) {
+                    return parsed
+                } else {
+                    // State too old, clear it
+                    this.clearTimerState()
+                }
+            }
+        } catch (e) {
+            console.log('Load timer state error', e)
+        }
+        return null
+    },
+
+    clearTimerState() {
+        try {
+            if (!this.state.storage) {
+                this.state.storage = new LocalStorage()
+            }
+            this.state.storage.removeItem(TIMER_STATE_KEY)
+            console.log('Timer state cleared')
+        } catch (e) {
+            console.log('Clear timer state error', e)
+        }
+    },
+
     calculateTotalTime() {
-        this.state.totalTimeLeft = 5 + (this.state.workDuration + this.state.restDuration) * this.state.totalLoops
+        // READY (5s) + WORK+REST cycles, but last REST is skipped so subtract one rest duration
+        this.state.totalTimeLeft = 5 + (this.state.workDuration + this.state.restDuration) * this.state.totalLoops - this.state.restDuration
+    },
+
+    // Recalculate total time based on current position
+    recalculateTotalTimeFromPosition() {
+        let total = 0
+
+        // Add remaining time in current phase
+        const now = Date.now()
+        const elapsed = now - this.state.phaseStartTime
+        const remainingInPhase = Math.max(0, Math.ceil((this.state.phaseDuration - elapsed) / 1000))
+        total += remainingInPhase
+
+        // Add time for remaining phases in current round
+        if (this.state.currentPhase === 'READY') {
+            total += (this.state.workDuration + this.state.restDuration) * this.state.totalLoops
+        } else if (this.state.currentPhase === 'WORK') {
+            // Add rest for current round only if it's not the last round (last round doesn't have rest)
+            if (this.state.currentLoop < this.state.totalLoops) {
+                total += this.state.restDuration // Rest after this work
+            }
+            total += (this.state.workDuration + this.state.restDuration) * (this.state.totalLoops - this.state.currentLoop)
+        } else if (this.state.currentPhase === 'REST') {
+            // Add all remaining rounds (work + rest)
+            total += (this.state.workDuration + this.state.restDuration) * (this.state.totalLoops - this.state.currentLoop)
+        }
+
+        this.state.totalTimeLeft = total
     },
 
     formatTotalTime(seconds) {
@@ -355,6 +537,7 @@ Page({
             const now = Date.now()
             const pauseDuration = now - this.state.pauseStartTime
             this.state.phaseStartTime += pauseDuration
+            this.state.totalPausedDuration += pauseDuration
 
             this.playFeedback('resume')
 
@@ -369,6 +552,9 @@ Page({
                 this.state.timer = null
             }
             this.playFeedback('pause')
+
+            // Save state when paused
+            this.saveTimerState()
         }
     },
 
@@ -383,10 +569,23 @@ Page({
         }
 
         if (direction > 0) {
-            this.state.phaseDuration = 0
-            this.state.phaseStartTime = 0
-            this.tick()
+            // Skip forward
+            if (this.state.currentPhase === 'READY') {
+                this.startWorkPhase()
+            } else if (this.state.currentPhase === 'WORK') {
+                this.startRestPhase()
+            } else if (this.state.currentPhase === 'REST') {
+                this.state.currentLoop++
+                if (this.state.currentLoop > this.state.totalLoops) {
+                    this.finishWorkout()
+                } else {
+                    this.startWorkPhase()
+                }
+            }
+            // Recalculate total time after skip
+            this.recalculateTotalTimeFromPosition()
         } else {
+            // Skip backward
             if (this.state.currentPhase === 'READY') {
                 this.state.phaseStartTime = Date.now()
                 this.state.phaseDuration = 5000
@@ -405,6 +604,8 @@ Page({
                 this.state.phaseDuration = this.state.workDuration * 1000
                 this.state.phaseStartTime = Date.now()
             }
+            // Recalculate total time after skip
+            this.recalculateTotalTimeFromPosition()
             this.updateUI(this.state.phaseDuration)
         }
     },
@@ -414,13 +615,10 @@ Page({
         this.state.timeLeft = 5
         this.state.phaseStartTime = Date.now()
         this.state.phaseDuration = 5000
+        this.state.workoutStartTime = Date.now()
+        this.state.totalPausedDuration = 0
 
         this.updateUI(this.state.phaseDuration)
-
-        // Keep screen on during workout
-        try {
-            setPageBrightTime({ brightTime: 0 })
-        } catch (e) { }
 
         if (this.state.timer) clearInterval(this.state.timer)
         this.state.timer = setInterval(() => {
@@ -469,6 +667,11 @@ Page({
             if (this.state.currentPhase === 'REST' && seconds <= 3 && seconds > 0) {
                 this.playFeedback('countdown')
             }
+
+            // Periodically save state (every 5 seconds)
+            if (seconds % 5 === 0) {
+                this.saveTimerState()
+            }
         }
 
         if (remaining <= 0) {
@@ -491,8 +694,10 @@ Page({
         this.state.currentPhase = 'FINISHED'
         this.state.timeLeft = 0
 
-        // Show total time at the end instead of 0:00
-        this.calculateTotalTime()
+        // Calculate real elapsed time
+        const now = Date.now()
+        const realElapsed = Math.floor((now - this.state.workoutStartTime - this.state.totalPausedDuration) / 1000)
+        this.state.totalTimeLeft = realElapsed
 
         this.playFeedback('finish')
         // Double buzzer sound for finish
@@ -503,6 +708,18 @@ Page({
                 }
             } catch (e) { }
         }, 1000)
+
+        // Clear saved state
+        this.clearTimerState()
+
+        // Allow screen to turn off normally again when workout is finished
+        try {
+            resetDropWristScreenOff()
+        } catch (e) { }
+
+        try {
+            resetPalmScreenOff()
+        } catch (e) { }
 
         this.updateUI(0)
     },
@@ -579,6 +796,7 @@ Page({
             this.state.timerLabelWidget.setProperty(prop.TEXT, 'FINISHED')
             this.state.timerLabelWidget.setProperty(prop.COLOR, COLOR_WORK)
             this.state.timerTextWidget.setProperty(prop.TEXT, 'DONE')
+            // Show elapsed time on finish
             this.state.totalTimeTextWidget.setProperty(prop.TEXT, this.formatTotalTime(this.state.totalTimeLeft))
             return
         }
